@@ -8,6 +8,8 @@ import (
 	"fmt"
 
 	"github.com/urfave/cli/v2"
+
+	"github.com/davexpro/blink/internal/pkg/blog"
 )
 
 var (
@@ -15,6 +17,11 @@ var (
 		&cli.StringFlag{
 			Name:  "endpoint",
 			Value: "",
+		},
+		&cli.StringFlag{
+			Name:    "server_key",
+			Aliases: []string{"k"},
+			Value:   "MC4CAQAwBQYDK2VwBCIEIPnbePjTl6598tuDOVstFswwa01wAXjCRaPhIs0ZWFZ4",
 		},
 		&cli.IntFlag{
 			Name:    "threads",
@@ -44,7 +51,27 @@ var (
 )
 
 func runServer(c *cli.Context) error {
-	h := NewBlinkServer()
+
+	// 1. unmarshal server key
+	srvKeyStr := c.String("server_key")
+	srvKeyBytes, err := base64.StdEncoding.DecodeString(srvKeyStr)
+	if err != nil {
+		return err
+	}
+
+	srvKeyAny, err := x509.ParsePKCS8PrivateKey(srvKeyBytes)
+	if err != nil {
+		return err
+	}
+
+	srvKey, ok := srvKeyAny.(ed25519.PrivateKey)
+	if !ok || len(srvKey) <= 0 {
+		blog.Errorf("invalid server key, should be ed25519 private key")
+		return nil
+	}
+
+	// init blink server
+	h := NewBlinkServer(srvKey)
 	return h.Run()
 }
 

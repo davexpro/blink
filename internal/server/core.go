@@ -19,10 +19,13 @@ import (
 )
 
 type BlinkServer struct {
+	srvKey ed25519.PrivateKey
 }
 
-func NewBlinkServer() *BlinkServer {
-	return &BlinkServer{}
+func NewBlinkServer(srvKey ed25519.PrivateKey) *BlinkServer {
+	return &BlinkServer{
+		srvKey: srvKey,
+	}
 }
 
 func (h *BlinkServer) Run() error {
@@ -35,7 +38,10 @@ func (h *BlinkServer) Run() error {
 	// https://github.com/cloudwego/hertz/issues/121
 	srv.NoHijackConnPool = true // for websocket
 
-	srv.GET("/ws", wrapServeWS)
+	// for server side endpoints
+	srv.GET("/ws", serveClientWS)
+
+	// TODO for admin side endpoints
 	srv.Spin()
 	return nil
 }
@@ -49,9 +55,10 @@ var upgrader = hertzWs.HertzUpgrader{
 		//ctx.Response.Header.Set("Sec-Websocket-Version", "13")
 		//ctx.AbortWithMsg(reason.Error(), status)
 	},
-} // use default options
+}
 
-func wrapServeWS(ctx context.Context, c *app.RequestContext) {
+// serveClientWS serve clients' conn
+func serveClientWS(ctx context.Context, c *app.RequestContext) {
 	// 1. request params check
 	cliVer, cliKeyRaw := c.GetHeader(consts.HeaderClientVersion), c.GetHeader(consts.HeaderClientKey)
 	if len(cliVer) <= 0 || len(cliKeyRaw) <= 0 {

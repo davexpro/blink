@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log"
+	"sync/atomic"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	hertzWs "github.com/hertz-contrib/websocket"
@@ -14,6 +15,8 @@ type ClientConnHandler struct {
 	ctx    context.Context
 	conn   *hertzWs.Conn
 	reqCtx *app.RequestContext
+
+	isVerified atomic.Bool
 }
 
 func NewClientConnHandler(ctx context.Context, c *app.RequestContext, conn *hertzWs.Conn) *ClientConnHandler {
@@ -28,6 +31,8 @@ func (h *ClientConnHandler) Serve() {
 	c := h.reqCtx
 	ctx := h.ctx
 	conn := h.conn
+
+	// TODO register conn
 
 	log.Println("x-real-ip", string(c.GetHeader("X-Real-IP")))
 	log.Println("xff", string(c.GetHeader("X-Forwarded-For")))

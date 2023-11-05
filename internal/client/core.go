@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bytedance/gopkg/lang/fastrand"
+	dx25519 "github.com/davexpro/crypto/ed25519"
 	"github.com/denisbrodbeck/machineid"
 	"github.com/gorilla/websocket"
 
@@ -28,10 +29,11 @@ type BlinkClient struct {
 	endpoint string
 	deviceId string
 
-	pubKey        string // client ed25519 pub key
-	priKey        string // client ed25519 pri key
-	srvKey        string // server ed25519 pri key
-	enableEncrypt bool   // enable chacha20poly1305
+	pubKey        ed25519.PublicKey  // client ed25519 pub key
+	priKey        ed25519.PrivateKey // client ed25519 pri key
+	srvKey        ed25519.PublicKey  // server ed25519 pub key
+	sharedKey     []byte             // chacha20poly1305 shared key
+	enableEncrypt bool               // enable chacha20poly1305
 
 	wsConn      *websocket.Conn
 	isConnected atomic.Bool
@@ -40,15 +42,12 @@ type BlinkClient struct {
 	exitMark atomic.Bool
 }
 
-func NewBlinkClient(endpoint string) *BlinkClient {
+func NewBlinkClient(endpoint string, srvKey ed25519.PublicKey) *BlinkClient {
 	// generate ed25519 key pairs
 	pub, pri, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		panic(err)
 	}
-
-	pubKey, _ := x509.MarshalPKIXPublicKey(pub)
-	priKey, _ := x509.MarshalPKCS8PrivateKey(pri)
 
 	// generate device id
 	did, err := machineid.ProtectedID(blink.Name)
@@ -63,12 +62,17 @@ func NewBlinkClient(endpoint string) *BlinkClient {
 		}
 	}
 
+	// generate shared key
+	sharedKey, err := dx25519.SharedKeyByEd25519(pri, srvKey)
+
 	return &BlinkClient{
-		endpoint: endpoint,
-		deviceId: did,
-		pubKey:   base64.StdEncoding.EncodeToString(pubKey),
-		priKey:   base64.StdEncoding.EncodeToString(priKey),
-		exitCh:   make(chan struct{}),
+		endpoint:  endpoint,
+		deviceId:  did,
+		pubKey:    pub,
+		priKey:    pri,
+		srvKey:    srvKey,
+		sharedKey: sharedKey,
+		exitCh:    make(chan struct{}),
 	}
 }
 
@@ -96,7 +100,7 @@ func (h *BlinkClient) Run() error {
 			continue
 		}
 		blog.Errorf("conn server failed, endpoint: %s err: %s", h.endpoint, err)
-		
+
 		// 连接重试的 backoff 策略
 		retryCnt += 1
 		if retryCnt <= 3 {
@@ -119,6 +123,7 @@ func (h *BlinkClient) Shutdown() {
 	os.Exit(0)
 }
 
+// connectServer connect server's endpoint
 func (h *BlinkClient) connectServer(ctx context.Context) error {
 	wsCli := &websocket.Dialer{
 		HandshakeTimeout:  time.Second * 10,
@@ -128,7 +133,8 @@ func (h *BlinkClient) connectServer(ctx context.Context) error {
 		"User-Agent":       {fmt.Sprintf("Blink Client/%s", blink.Version)},
 		"Content-Encoding": {"gzip"},
 	}
-	headers.Add(consts.HeaderClientKey, h.pubKey)
+	pubKeyStr, _ := x509.MarshalPKIXPublicKey(h.pubKey)
+	headers.Add(consts.HeaderClientKey, base64.StdEncoding.EncodeToString(pubKeyStr))
 	headers.Add(consts.HeaderClientVersion, blink.Version)
 
 	conn, httpResp, err := wsCli.DialContext(ctx, h.endpoint, headers)
@@ -185,8 +191,7 @@ func (h *BlinkClient) heartbeat() {
 			if h.isConnected.Load() || h.wsConn == nil {
 				return
 			}
-
-			err := h.wsConn.WriteMessage(websocket.TextMessage, []byte(runtime.GOARCH+"|"+runtime.GOOS))
+			err := h.wsConn.WriteMessage(websocket.PingMessage, []byte(runtime.GOARCH+"|"+runtime.GOOS))
 			if err != nil {
 				blog.Errorf("ws write error: %w", err)
 			}
