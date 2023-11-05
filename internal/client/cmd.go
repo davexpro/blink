@@ -6,7 +6,7 @@ var (
 	flags = []cli.Flag{
 		&cli.StringFlag{
 			Name:  "endpoint",
-			Value: "",
+			Value: "ws://127.0.0.1:18888/ws",
 		},
 		&cli.IntFlag{
 			Name:    "threads",
@@ -28,6 +28,6 @@ var (
 )
 
 func runClient(c *cli.Context) error {
-	h := NewBlinkClient()
+	h := NewBlinkClient(c.String("endpoint"))
 	return h.Run()
 }

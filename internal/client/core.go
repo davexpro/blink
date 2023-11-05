@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/davexpro/blink"
+	"github.com/davexpro/blink/internal/consts"
 	"github.com/davexpro/blink/internal/pkg/blog"
 )
 
@@ -39,7 +40,7 @@ type BlinkClient struct {
 	exitMark atomic.Bool
 }
 
-func NewBlinkClient() *BlinkClient {
+func NewBlinkClient(endpoint string) *BlinkClient {
 	// generate ed25519 key pairs
 	pub, pri, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -63,9 +64,10 @@ func NewBlinkClient() *BlinkClient {
 	}
 
 	return &BlinkClient{
+		endpoint: endpoint,
+		deviceId: did,
 		pubKey:   base64.StdEncoding.EncodeToString(pubKey),
 		priKey:   base64.StdEncoding.EncodeToString(priKey),
-		deviceId: did,
 		exitCh:   make(chan struct{}),
 	}
 }
@@ -93,7 +95,8 @@ func (h *BlinkClient) Run() error {
 			time.Sleep(time.Second * 15)
 			continue
 		}
-
+		blog.Errorf("conn server failed, endpoint: %s err: %s", h.endpoint, err)
+		
 		// 连接重试的 backoff 策略
 		retryCnt += 1
 		if retryCnt <= 3 {
@@ -125,9 +128,9 @@ func (h *BlinkClient) connectServer(ctx context.Context) error {
 		"User-Agent":       {fmt.Sprintf("Blink Client/%s", blink.Version)},
 		"Content-Encoding": {"gzip"},
 	}
-	if len(h.pubKey) > 0 {
-		headers.Add("x-blink-key", h.pubKey)
-	}
+	headers.Add(consts.HeaderClientKey, h.pubKey)
+	headers.Add(consts.HeaderClientVersion, blink.Version)
+
 	conn, httpResp, err := wsCli.DialContext(ctx, h.endpoint, headers)
 	if err != nil {
 		return err
