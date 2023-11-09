@@ -47,11 +47,17 @@ var (
 			Action:      runGenKey,
 			Flags:       flags,
 		},
+		{
+			Name:        "config",
+			Usage:       "",
+			UsageText:   "",
+			Description: "",
+			Action:      runConfig,
+		},
 	}
 )
 
 func runServer(c *cli.Context) error {
-
 	// 1. unmarshal server key
 	srvKeyStr := c.String("server_key")
 	srvKeyBytes, err := base64.StdEncoding.DecodeString(srvKeyStr)
@@ -86,5 +92,10 @@ func runGenKey(*cli.Context) error {
 
 	fmt.Println("pubKey:", base64.StdEncoding.EncodeToString(pubKey))
 	fmt.Println("priKey:", base64.StdEncoding.EncodeToString(priKey))
+	return nil
+}
+
+// runConfig config generate helper
+func runConfig(ctx *cli.Context) error {
 	return nil
 }

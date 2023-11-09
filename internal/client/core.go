@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/ed25519"
@@ -9,15 +10,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/bytedance/gopkg/lang/fastrand"
+	"github.com/bytedance/sonic"
 	dx25519 "github.com/davexpro/crypto/ed25519"
 	"github.com/denisbrodbeck/machineid"
 	"github.com/gorilla/websocket"
@@ -48,6 +50,7 @@ type BlinkClient struct {
 
 var (
 	errInvalidConn = errors.New("invalid conn")
+	errInvalidSign = errors.New("invalid sign")
 )
 
 func NewBlinkClient(endpoint string, srvKey ed25519.PublicKey) *BlinkClient {
@@ -150,12 +153,12 @@ func (h *BlinkClient) connectServer(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Println(httpResp)
+	blog.Infof(util.MustMarshalString(httpResp.Header))
 
 	h.wsConn = conn
 	h.isConnected.Store(true)
 
-	// send auth frame
+	// 1. send identifier
 	authBytes, err := util.Chacha20Encrypt(h.sharedKey, []byte(consts.BlinkIdentifier))
 	if err != nil {
 		blog.Errorf("crypto `Chacha20Encrypt` failed, detail: %s", err)
@@ -168,14 +171,15 @@ func (h *BlinkClient) connectServer(ctx context.Context) error {
 		return err
 	}
 
+	// 2. serve the connection
 	go h.serve()
 	go h.heartbeat()
 
 	return nil
 }
 
+// serve .
 func (h *BlinkClient) serve() {
-
 	for {
 		select {
 		case <-h.exitCh:
@@ -185,21 +189,45 @@ func (h *BlinkClient) serve() {
 				return
 			}
 
+			timeNow := util.GetCurrentTimeCache()
 			ctx := context.Background()
+			ctx = context.WithValue(ctx, consts.CtxKeyStartTime, timeNow.UnixMilli())
 			msgType, msgData, err := h.wsConn.ReadMessage()
-			if nil != err {
+			if err != nil {
 				blog.Errorf("conn read fail: %s", err)
-				h.isConnected.Store(false)
+				h.disconnected()
 				return
 			}
 
-			switch msgType {
-			case websocket.BinaryMessage:
-				fmt.Println(ctx, msgData)
-				//t.handleFrame(ctx, msgData)
-			case websocket.PingMessage:
-				h.wsConn.WriteMessage(websocket.PongMessage, []byte(strconv.FormatInt(time.Now().UnixNano(), 10)))
-			default:
+			// handle the `ping`
+			if msgType == websocket.PingMessage {
+				body := fmt.Sprintf("%s|%s|%s|%s|%d",
+					blink.Name, blink.Version, runtime.GOARCH, runtime.GOOS, timeNow.UnixMilli())
+				err = h.wsConn.WriteMessage(websocket.PingMessage, []byte(body))
+				if err != nil {
+					blog.Errorf("ws `WriteMessage` error: %s", err)
+					if strings.Contains(err.Error(), "broken pipe") {
+						h.disconnected()
+					}
+				}
+				continue
+			}
+
+			// we only recognize binary message
+			if msgType != websocket.BinaryMessage {
+				continue
+			}
+
+			// unmarshal the cmd
+			frame, err := h.unmarshalFrame(msgData)
+			if err != nil {
+				blog.CtxErrorf(ctx, "cli `unmarshalFrame` error: %s", err)
+				continue
+			}
+
+			err = h.handle(frame)
+			if err != nil {
+				blog.CtxErrorf(ctx, "cli `handle` error: %s", err)
 			}
 		}
 	}
@@ -217,8 +245,9 @@ func (h *BlinkClient) heartbeat() {
 			if !h.isConnected.Load() || h.wsConn == nil {
 				return
 			}
+			// TODO heartbeat node stats
 			body := fmt.Sprintf("%s|%s|%s|%s|%d",
-				blink.Name, blink.Version, runtime.GOARCH, runtime.GOOS, time.Now().UnixMilli())
+				blink.Name, blink.Version, runtime.GOARCH, runtime.GOOS, util.GetCurrentTimeCache().UnixMilli())
 			err := h.wsConn.WriteMessage(websocket.PingMessage, []byte(body))
 			if err != nil {
 				blog.Errorf("ws `WriteMessage` error: %s", err)
@@ -229,6 +258,66 @@ func (h *BlinkClient) heartbeat() {
 		}
 		timer.Reset(consts.HeartbeatDuration)
 	}
+}
+
+// unmarshalFrame unmarshal the frame from server
+func (h *BlinkClient) unmarshalFrame(body []byte) (*consts.Frame, error) {
+	// 1. decrypt th body
+	decrypted, err := util.Chacha20Encrypt(h.sharedKey, body)
+	if err != nil {
+		blog.Errorf("util `Chacha20Encrypt` error: %w", err)
+		return nil, err
+	}
+
+	// 2. ungzip the body
+	gzipReader, err := gzip.NewReader(bytes.NewReader(decrypted))
+	if err != nil {
+		blog.Errorf("gzip `NewReader` error: %w", err)
+		return nil, err
+	}
+
+	body, err = io.ReadAll(gzipReader)
+	if err != nil {
+		blog.Errorf("io `ReadAll` error: %w", err)
+		return nil, err
+	}
+
+	// 3. unmarshal to json
+	frame := &consts.Frame{}
+	err = sonic.Unmarshal(body, &frame)
+	if err != nil {
+		blog.Errorf("sonic `Unmarshal` error: %w", err)
+		return nil, err
+	}
+
+	// 4. verify the sign
+	sign := frame.Signature
+	if len(sign) < 6 {
+		return nil, errInvalidSign
+	}
+	frame.Signature = ""
+	bs, _ := sonic.Marshal(frame)
+	signBs, _ := base64.StdEncoding.DecodeString(sign)
+	if !ed25519.Verify(h.srvKey, bs, signBs) {
+		return nil, errInvalidSign
+	}
+
+	return frame, nil
+}
+
+// writeFrame write frame to server
+func (h *BlinkClient) writeFrame(frame *consts.Frame) error {
+	if frame == nil {
+		return nil
+	}
+
+	// 1. fill the required props
+	frame.DeviceID = h.deviceId
+	frame.Timestamp = util.GetCurrentTimeCache().UnixMilli()
+
+	// 2. marshal and send it
+	bs, _ := sonic.Marshal(frame)
+	return h.writeMsg(websocket.BinaryMessage, bs)
 }
 
 // writeMsg json -> gzip -> chacha20-poly
@@ -266,10 +355,10 @@ func (h *BlinkClient) writeMsg(msgType int, body []byte) error {
 	}
 
 	blog.Infof("send msg, raw: %d gzip: %d encrypted: %d", len(body), len(gzBody), len(encBody))
-
 	return nil
 }
 
+// disconnected set the connection is disconnected
 func (h *BlinkClient) disconnected() {
 	h.isConnected.Store(false)
 	h.wsConn = nil
