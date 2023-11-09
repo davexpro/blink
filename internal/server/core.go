@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/config"
+	dx25519 "github.com/davexpro/crypto/ed25519"
 	hertzWs "github.com/hertz-contrib/websocket"
 
 	"github.com/davexpro/blink/internal/consts"
@@ -39,7 +40,7 @@ func (h *BlinkServer) Run() error {
 	srv.NoHijackConnPool = true // for websocket
 
 	// for server side endpoints
-	srv.GET("/ws", serveClientWS)
+	srv.GET("/ws", h.serveClientWS)
 
 	// TODO for admin side endpoints
 	srv.Spin()
@@ -58,7 +59,7 @@ var upgrader = hertzWs.HertzUpgrader{
 }
 
 // serveClientWS serve clients' conn
-func serveClientWS(ctx context.Context, c *app.RequestContext) {
+func (h *BlinkServer) serveClientWS(ctx context.Context, c *app.RequestContext) {
 	// 1. request params check
 	cliVer, cliKeyRaw := c.GetHeader(consts.HeaderClientVersion), c.GetHeader(consts.HeaderClientKey)
 	if len(cliVer) <= 0 || len(cliKeyRaw) <= 0 {
@@ -88,8 +89,15 @@ func serveClientWS(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	sharedKey, err := dx25519.SharedKeyByEd25519(h.srvKey, cliKey)
+	if err != nil {
+		c.AbortWithMsg(consts.HTTPAbortMessage, http.StatusNotFound)
+		blog.CtxWarnf(ctx, "dx25519 `SharedKeyByEd25519` failed, detail: %s", err)
+		return
+	}
+
 	// 3. upgrade conn and serve
-	err = upgrader.Upgrade(c, func(conn *hertzWs.Conn) { NewClientConnHandler(ctx, c, conn).Serve() })
+	err = upgrader.Upgrade(c, func(conn *hertzWs.Conn) { NewClientConnHandler(ctx, c, conn, cliKey, sharedKey).Serve() })
 	if err != nil {
 		log.Print("upgrade:", err)
 		c.AbortWithMsg("404 page not found", http.StatusNotFound)

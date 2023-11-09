@@ -19,7 +19,7 @@ var (
 		&cli.StringFlag{
 			Name:    "server_key",
 			Aliases: []string{"k", "srv_key"},
-			Value:   "ws://127.0.0.1:18888/ws",
+			Value:   "MCowBQYDK2VwAyEACubq6oo/fFmvt7rer0MTYP2neD/WJn5E7ILUxypXNbk=",
 		},
 		&cli.StringFlag{
 			Name:    "config",

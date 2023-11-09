@@ -21,7 +21,7 @@ var (
 		&cli.StringFlag{
 			Name:    "server_key",
 			Aliases: []string{"k"},
-			Value:   "MC4CAQAwBQYDK2VwBCIEIPnbePjTl6598tuDOVstFswwa01wAXjCRaPhIs0ZWFZ4",
+			Value:   "MC4CAQAwBQYDK2VwBCIEIM2V07AyaaI4AHt2bx+gYKGWv3Sbxd0PSMP58lDSiRcM",
 		},
 		&cli.IntFlag{
 			Name:    "threads",
