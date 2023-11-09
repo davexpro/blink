@@ -2,20 +2,31 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/base64"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/cloudwego/hertz/pkg/common/config"
+	dx25519 "github.com/davexpro/crypto/ed25519"
 	hertzWs "github.com/hertz-contrib/websocket"
+
+	"github.com/davexpro/blink/internal/consts"
+	"github.com/davexpro/blink/internal/pkg/blog"
 )
 
 type BlinkServer struct {
+	srvKey ed25519.PrivateKey
 }
 
-func NewBlinkServer() *BlinkServer {
-	return &BlinkServer{}
+func NewBlinkServer(srvKey ed25519.PrivateKey) *BlinkServer {
+	return &BlinkServer{
+		srvKey: srvKey,
+	}
 }
 
 func (h *BlinkServer) Run() error {
@@ -28,7 +39,10 @@ func (h *BlinkServer) Run() error {
 	// https://github.com/cloudwego/hertz/issues/121
 	srv.NoHijackConnPool = true // for websocket
 
-	srv.GET("/feedback", feedback)
+	// for server side endpoints
+	srv.GET("/ws", h.serveClientWS)
+
+	// TODO for admin side endpoints
 	srv.Spin()
 	return nil
 }
@@ -42,48 +56,51 @@ var upgrader = hertzWs.HertzUpgrader{
 		//ctx.Response.Header.Set("Sec-Websocket-Version", "13")
 		//ctx.AbortWithMsg(reason.Error(), status)
 	},
-} // use default options
+}
 
-func feedback(ctx context.Context, c *app.RequestContext) {
-	err := upgrader.Upgrade(c, func(conn *hertzWs.Conn) {
-		log.Println("x-real-ip", string(c.GetHeader("X-Real-IP")))
-		log.Println("xff", string(c.GetHeader("X-Forwarded-For")))
-		log.Println(conn.RemoteAddr())
-		for {
-			mt, message, err := conn.ReadMessage()
-			if err != nil {
-				log.Println("read:", err)
-				break
-			}
+// serveClientWS serve clients' conn
+func (h *BlinkServer) serveClientWS(ctx context.Context, c *app.RequestContext) {
+	// 1. request params check
+	cliVer, cliKeyRaw := c.GetHeader(consts.HeaderClientVersion), c.GetHeader(consts.HeaderClientKey)
+	if len(cliVer) <= 0 || len(cliKeyRaw) <= 0 {
+		c.AbortWithMsg(consts.HTTPAbortMessage, http.StatusNotFound)
+		return
+	}
 
-			log.Println(mt, len(message), string(message))
-			// gzip 解包
-			//gReader, err := gzip.NewReader(bytes.NewReader(message))
-			//if err != nil {
-			//	log.Println("gzip err", err)
-			//	continue
-			//}
-			//
-			//msg, _ := ioutil.ReadAll(gReader)
-			//log.Printf("gzip len: %d", len(message))
+	// 2. try to unmarshal ed25519 keys
+	keyBytes, err := base64.StdEncoding.DecodeString(string(cliKeyRaw))
+	if err != nil {
+		c.AbortWithMsg(consts.HTTPAbortMessage, http.StatusNotFound)
+		blog.CtxWarnf(ctx, "base64 `Decode` failed, detail: %s", err)
+		return
+	}
 
-			// protobuf 解包
-			//frame := &pb_gen.Frame{}
-			//_, err = fastpb.ReadMessage(msg, int8(fastpb.SkipTypeCheck), frame)
-			//if err != nil {
-			//	log.Println("err", err)
-			//}
-			//fmt.Println(frame)
+	cliKeyAny, err := x509.ParsePKIXPublicKey(keyBytes)
+	if err != nil {
+		c.AbortWithMsg(consts.HTTPAbortMessage, http.StatusNotFound)
+		blog.CtxWarnf(ctx, "x509 `ParsePKIXPublicKey` failed, detail: %s", err)
+		return
+	}
 
-			err = conn.WriteMessage(mt, message)
-			if err != nil {
-				log.Println("write:", err)
-				break
-			}
-		}
-	})
+	cliKey, ok := cliKeyAny.(ed25519.PublicKey)
+	if !ok || len(cliKey) <= 0 {
+		c.AbortWithMsg(consts.HTTPAbortMessage, http.StatusNotFound)
+		blog.CtxWarnf(ctx, "given key is not ed25519 pub key")
+		return
+	}
+
+	sharedKey, err := dx25519.SharedKeyByEd25519(h.srvKey, cliKey)
+	if err != nil {
+		c.AbortWithMsg(consts.HTTPAbortMessage, http.StatusNotFound)
+		blog.CtxWarnf(ctx, "dx25519 `SharedKeyByEd25519` failed, detail: %s", err)
+		return
+	}
+
+	// 3. upgrade conn and serve
+	err = upgrader.Upgrade(c, func(conn *hertzWs.Conn) { NewClientConnHandler(ctx, c, conn, cliKey, sharedKey).Serve() })
 	if err != nil {
 		log.Print("upgrade:", err)
+		c.AbortWithMsg("404 page not found", http.StatusNotFound)
 		return
 	}
 }
